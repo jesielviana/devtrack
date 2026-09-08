@@ -1,0 +1,8 @@
+"use client";
+
+import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+
+export function DashboardCharts({ status, repositories }: { status: { name: string; value: number }[]; repositories: { name: string; value: number }[] }) {
+  const colors = ["#6366f1", "#f59e0b", "#10b981"];
+  return <div className="grid gap-5 lg:grid-cols-2"><section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950"><h2 className="font-semibold">Work by status</h2><div className="mt-4 h-64"><ResponsiveContainer><PieChart><Pie data={status} dataKey="value" nameKey="name" innerRadius={58} outerRadius={90} paddingAngle={4}>{status.map((entry, index) => <Cell key={entry.name} fill={colors[index]} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer></div><div className="flex justify-center gap-5 text-xs text-slate-500">{status.map((entry, index) => <span key={entry.name}><i className="mr-1 inline-block size-2 rounded-full" style={{ background: colors[index] }} />{entry.name} {entry.value}</span>)}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950"><h2 className="font-semibold">Items by repository</h2><div className="mt-4 h-64"><ResponsiveContainer><BarChart data={repositories} layout="vertical" margin={{ left: 20 }}><XAxis type="number" hide /><YAxis type="category" dataKey="name" width={105} tick={{ fontSize: 11 }} /><Tooltip /><Bar dataKey="value" fill="#6366f1" radius={[0, 5, 5, 0]} /></BarChart></ResponsiveContainer></div></section></div>;
+}
