@@ -90,6 +90,10 @@ const createTaskSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(32)).max(12),
 });
 
+const updateTaskSchema = createTaskSchema.extend({
+  id: z.string().uuid(),
+});
+
 export async function createTask(input: unknown) {
   const userId = await currentUserId();
   const task = createTaskSchema.parse(input);
@@ -106,6 +110,22 @@ export async function setTaskCompleted(taskId: string, completed: boolean) {
   const userId = await currentUserId();
   const updated = await db.update(tasks).set({ completedAt: completed ? new Date() : null, updatedAt: new Date() })
     .where(and(eq(tasks.id, taskId), eq(tasks.userId, userId))).returning({ id: tasks.id });
+  if (!updated.length) throw new Error("Task not found.");
+  revalidatePath("/", "layout");
+}
+
+export async function updateTask(input: unknown) {
+  const userId = await currentUserId();
+  const task = updateTaskSchema.parse(input);
+  if ((task.repositoryId === null) !== (task.repositoryName === null)) throw new Error("Invalid repository.");
+  const updated = await db.update(tasks).set({
+    title: task.title,
+    repositoryId: task.repositoryId,
+    repositoryName: task.repositoryName,
+    targetDate: task.targetDate ? new Date(`${task.targetDate}T12:00:00.000Z`) : null,
+    tags: JSON.stringify(task.tags),
+    updatedAt: new Date(),
+  }).where(and(eq(tasks.id, task.id), eq(tasks.userId, userId))).returning({ id: tasks.id });
   if (!updated.length) throw new Error("Task not found.");
   revalidatePath("/", "layout");
 }
