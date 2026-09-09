@@ -21,6 +21,18 @@ type GitHubIssue = {
 
 type GitHubSearchResult = { items: GitHubIssue[] };
 
+type GitHubAccount = {
+  accessToken: string | null;
+  refreshToken: string | null;
+  expiresAt: number | null;
+};
+
+type RefreshTokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+};
+
 function repositoryDetails(issue: GitHubIssue) {
   if (issue.repository) {
     return {
@@ -41,8 +53,8 @@ function repositoryDetails(issue: GitHubIssue) {
   };
 }
 
-async function githubFetch<T>(path: string, token: string): Promise<T> {
-  const response = await fetch(`https://api.github.com${path}`, {
+async function requestGitHub(path: string, token: string): Promise<Response> {
+  return fetch(`https://api.github.com${path}`, {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
@@ -50,7 +62,9 @@ async function githubFetch<T>(path: string, token: string): Promise<T> {
     },
     next: { revalidate: 0 },
   });
-  if (response.status === 401) throw new Error("Your GitHub session has expired. Please sign in again.");
+}
+
+async function parseGitHubResponse<T>(response: Response): Promise<T> {
   if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
     throw new Error("GitHub rate limit reached. Please try again later.");
   }
@@ -61,18 +75,62 @@ async function githubFetch<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function getAccessToken(userId: string) {
-  const [account] = await db.select({ token: accounts.access_token }).from(accounts)
+async function getGitHubAccount(userId: string): Promise<GitHubAccount> {
+  const [account] = await db.select({
+    accessToken: accounts.access_token,
+    refreshToken: accounts.refresh_token,
+    expiresAt: accounts.expires_at,
+  }).from(accounts)
     .where(and(eq(accounts.userId, userId), eq(accounts.provider, "github"))).limit(1);
-  if (!account?.token) throw new Error("No GitHub authorization was found for this account.");
-  return account.token;
+  if (!account?.accessToken) throw new Error("No GitHub authorization was found for this account.");
+  return account;
+}
+
+async function refreshGitHubAccessToken(userId: string, refreshToken: string): Promise<GitHubAccount> {
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("GitHub OAuth is not configured.");
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token", refresh_token: refreshToken }),
+    cache: "no-store",
+  });
+  const refreshed = await response.json() as RefreshTokenResponse;
+  if (!response.ok || !refreshed.access_token || !refreshed.refresh_token) {
+    throw new Error("Your GitHub session has expired. Please sign in again.");
+  }
+  const expiresAt = refreshed.expires_in ? Math.floor(Date.now() / 1000) + refreshed.expires_in : null;
+  await db.update(accounts).set({
+    access_token: refreshed.access_token,
+    refresh_token: refreshed.refresh_token,
+    expires_at: expiresAt,
+  }).where(and(eq(accounts.userId, userId), eq(accounts.provider, "github")));
+  return { accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token, expiresAt };
+}
+
+async function createGitHubClient(userId: string) {
+  let account = await getGitHubAccount(userId);
+  if (account.expiresAt && account.expiresAt <= Math.floor(Date.now() / 1000) + 60) {
+    if (!account.refreshToken) throw new Error("Your GitHub session has expired. Please sign in again.");
+    account = await refreshGitHubAccessToken(userId, account.refreshToken);
+  }
+  return async function githubFetch<T>(path: string): Promise<T> {
+    let response = await requestGitHub(path, account.accessToken!);
+    if (response.status === 401 && account.refreshToken) {
+      account = await refreshGitHubAccessToken(userId, account.refreshToken);
+      response = await requestGitHub(path, account.accessToken!);
+    }
+    if (response.status === 401) throw new Error("Your GitHub session has expired. Please sign in again.");
+    return parseGitHubResponse<T>(response);
+  };
 }
 
 export async function syncGitHub(userId?: string) {
   const session = await auth();
   const authenticatedUserId = userId ?? session?.user?.id;
   if (!authenticatedUserId || (userId && session?.user?.id !== userId)) throw new Error("Unauthorized.");
-  const token = await getAccessToken(authenticatedUserId);
+  const githubFetch = await createGitHubClient(authenticatedUserId);
   let synced = 0;
   let completedPagination = true;
   const assignedItemIds: string[] = [];
@@ -86,7 +144,7 @@ export async function syncGitHub(userId?: string) {
       let page = 1;
       while (page <= 10) {
         const query = encodeURIComponent(`assignee:@me archived:false is:${type === "issue" ? "issue" : "pr"} state:${state} ${ignoredQualifiers}`.trim());
-        const result = await githubFetch<GitHubSearchResult>(`/search/issues?q=${query}&sort=updated&order=desc&per_page=100&page=${page}`, token);
+        const result = await githubFetch<GitHubSearchResult>(`/search/issues?q=${query}&sort=updated&order=desc&per_page=100&page=${page}`);
         if (!result.items.length) break;
         for (const issue of result.items) {
           const itemId = String(issue.id);
